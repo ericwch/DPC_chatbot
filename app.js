@@ -143,9 +143,10 @@ async function handleMessage(sender_psid, received_message) {
   if (nlpUtil.checkEntity(received_message.nlp, nlpEntites.BYE, 0.8)) {
     generatedRes.text = generatedRes.text + "See you soon. ";
   }
-
+  
+  
   // When non of the above match the recieved message
-  if (!(generatedRes.text || generatedRes.attachment)) {
+  if (!(generatedRes.text || generatedRes.attachment.length)) {
     //check sentiment
     if (nlpUtil.checkEntity(received_message.nlp, nlpEntites.SENTIMENT, 0.6)) {
       let sentiment = nlpUtil.getFirstEntity(
@@ -153,7 +154,8 @@ async function handleMessage(sender_psid, received_message) {
         nlpEntites.SENTIMENT
       );
       let sentimentValues = nlpUtil.values.sentiment;
-
+      
+      
       if (sentiment.value == sentimentValues.POSITIVE) {
         generatedRes.text = generatedRes.text + "Hope to see you soon <3";
       } else if (sentiment.value == sentimentValues.NEGATIVE) {
@@ -161,12 +163,12 @@ async function handleMessage(sender_psid, received_message) {
           generatedRes.text + "I'm sorry :( plz dont be mean :(";
       } else if (sentiment.value == sentimentValues.NEUTRAL) {
         generatedRes.text = generatedRes.text + "Alright";
-      }
+      } 
     } else {
       generatedRes.text = "I dont understand :( I'm retarded :(";
     }
   }
-
+  
   // Sends the concated response message
   if (generatedRes.text) {
     await APIUtil.callSendAPI(sender_psid, {
