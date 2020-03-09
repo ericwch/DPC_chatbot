@@ -1,260 +1,204 @@
+/* 
+09/03/2020
+Author: Eric Wong 
+Email: bbbaba1997@gmail.com
+Description: 
 
-'use strict';
+    Chatbot for Unimelb Drawing and Painting Club facebook page. The chatbot uses
+    regex to identify keywords and the facebook implemented nlp to identify meaning 
+    in the recieved message. Concat the corresponding responses for the identified keywords or 
+    meanings and send it to the client.
+    
+    response.js - an object of regex of keywords and their corresponding response text/attachment
+    quickReplies.js - Define quickReplies buttons sent with each response. See SendAPI doc
+    payloadHandler.js - Payload enums and handler functions of each payload
+    nlpUtil.js - 
+          nlp entities and velue enums
+          util functions for handling the nlp field in the recieved message. See facebook nlp doc
+    
+    *The handling of how to response to payloads is done in the corresonding payloadHandler function.
+    The handling of how to response to keywords or meaning is done in function handleMessage() below
+    
+*/
 
+"use strict";
 
 // Imports dependencies and set up http server
-const response =  require("./reponse")
-const quickReplies = require("./quickReplies")
-const
-  express = require('express'),
-  axios = require('axios'),
-  
-  app = express() // creates express http server
-  
-app.use(express.json())
+const APIUtil = require("./APIUtil");
+const response = require("./response");
+const quickReplies = require("./quickReplies");
+const nlpUtil = require("./nlpUtil");
+const payloadHandler = require("./payloadHandler");
+const express = require("express");
 
-const PAGE_ACCESS_TOKEN = process.env.PAGE_ACCESS_TOKEN;
+const app = express(); // creates express http server
 
-
+app.use(express.json());
 
 // Sets server port and logs message on success
-app.listen(process.env.PORT || 1337, () => console.log('webhook is listening'));
+app.listen(process.env.PORT || 1337, () => console.log("webhook is listening"));
 
 // Accepts POST requests at /webhook endpoint
-app.post('/webhook', (req, res) => {  
-
+app.post("/webhook", (req, res) => {
   // Parse the request body from the POST
   let body = req.body;
 
   // Check the webhook event is from a Page subscription
-  if (body.object === 'page') {
-
+  if (body.object === "page") {
     // Iterate over each entry - there may be multiple if batched
     body.entry.forEach(function(entry) {
-
-      // Get the webhook event. entry.messaging is an array, but 
+      // Get the webhook event. entry.messaging is an array, but
       // will only ever contain one event, so we get index 0
       let webhook_event = entry.messaging[0];
       console.log(webhook_event);
-      
+
       // Get the sender PSID
       let sender_psid = webhook_event.sender.id;
-      console.log('Sender PSID: ' + sender_psid);
-      
+      console.log("Sender PSID: " + sender_psid);
+
       // Check if the event is a message or postback and
       // pass the event to the appropriate handler function
       if (webhook_event.message) {
-        handleMessage(sender_psid, webhook_event.message);        
+        handleMessage(sender_psid, webhook_event.message);
       } else if (webhook_event.postback) {
         handlePostback(sender_psid, webhook_event.postback);
       }
-        });
+    });
 
     // Return a '200 OK' response to all events
-    res.status(200).send('EVENT_RECEIVED');
-
+    res.status(200).send("EVENT_RECEIVED");
   } else {
     // Return a '404 Not Found' if event is not from a page subscription
     res.sendStatus(404);
   }
-
 });
 
 // Accepts GET requests at the /webhook endpoint
-app.get('/webhook', (req, res) => {
-  
+app.get("/webhook", (req, res) => {
   /** UPDATE YOUR VERIFY TOKEN **/
   const VERIFY_TOKEN = process.env.VERIFY_TOKEN;
-  
+
   // Parse params from the webhook verification request
-  let mode = req.query['hub.mode'];
-  let token = req.query['hub.verify_token'];
-  let challenge = req.query['hub.challenge'];
-    
+  let mode = req.query["hub.mode"];
+  let token = req.query["hub.verify_token"];
+  let challenge = req.query["hub.challenge"];
+
   // Check if a token and mode were sent
   if (mode && token) {
-  
     // Check the mode and token sent are correct
-    if (mode === 'subscribe' && token === VERIFY_TOKEN) {
-      
+    if (mode === "subscribe" && token === VERIFY_TOKEN) {
       // Respond with 200 OK and challenge token from the request
-      console.log('WEBHOOK_VERIFIED');
+      console.log("WEBHOOK_VERIFIED");
       res.status(200).send(challenge);
-    
     } else {
       // Responds with '403 Forbidden' if verify tokens do not match
-      res.sendStatus(403);      
+      res.sendStatus(403);
     }
   }
 });
-
-
 
 // Handles messages events
 async function handleMessage(sender_psid, received_message) {
   
-  if (received_message.text == "Talk to commeitee"){
-    callSendAPI(sender_psid, {"text": "Please leave your message. They will soon get back to you. Ciao :)"})
-    callSendAPI(sender_psid, {"attachment": {
-                    "type": "image",
-                    "payload": {
-                        "url": "https://cdn.glitch.com/0894bffb-63f3-4f3b-af65-0acd959582c3%2Frobot.gif?v=1582981704530",
-                      }
-                  }})
-    passThreadControl(sender_psid, process.env.BOT_ID)
-    return
+
+  // When receive the payload "TO_MANUAL", pass control to inbox and terminate the handle function
+  if (
+    received_message.quick_reply &&
+    received_message.quick_reply.payload == payloadHandler.payloads.TO_MANUAL
+  ) {
+    payloadHandler.toManualHandler(sender_psid);
+    return;
   }
-  
-  let generatedText = ""
-  let generatedAttachment 
-  
-  const greeting = getFirstEntity(received_message.nlp, 'greetings');
-  const thanks = getFirstEntity(received_message.nlp, "thanks")
-  const bye = getFirstEntity(received_message.nlp, "bye")
-  const sentiment = getFirstEntity(received_message.nlp, "sentiment")
-  
-  if (greeting && greeting.confidence > 0.8) {
-    generatedText = generatedText + "Hi there :D. "
-  }
-  
-  if (thanks && thanks.confidence > 0.8){
-    generatedText = generatedText + "No problems. "
-  }
-  
-  if (bye && bye.confidence > 0.8){
-    generatedText = generatedText + "See you soon. "
-  }
-  
-  Object.keys(response).forEach( (reqPattern => {
+
     
-    if(new RegExp(reqPattern,"i").test(received_message.text)){
+  // The following code handles nlp and keyword matching
+  let generatedRes = { text: "", attachment: new Array() };
+  let nlpEntites = nlpUtil.entities;
+  
+  
+  // handle greetings
+  if (nlpUtil.checkEntity(received_message.nlp, nlpEntites.GREETINGS, 0.8)) {
+    generatedRes.text = generatedRes.text + "Hi there :D ";
+  }
+
+  // handle keyword matching with regex
+  Object.keys(response).forEach(reqPattern => {
+    if (new RegExp(reqPattern, "i").test(received_message.text)) {
+      generatedRes.text = generatedRes.text + response[reqPattern].text + " ";
       
-      if (response[reqPattern].text){
-        generatedText = generatedText + response[reqPattern].text + " "
-      }
+      // if the corresponding response has an attachement
       if (response[reqPattern].attachment){
-        generatedAttachment = response[reqPattern].attachment
+        generatedRes.attachment.push(response[reqPattern].attachment);
       }
-    }
-  })
-  )
-  
-  if(!(generatedText||generatedAttachment)){
-    
-    console.log(sentiment)
-    if(sentiment && sentiment.confidence > 0.6){
       
-      switch(sentiment.value){
-        case "positive": generatedText = "Hope to see you soon <3";break;
-        case "neutral": generatedText = "Alright";break;
-        case "negative": generatedText = "Please dont be mean :(. I'm so sorry :(:(";break;
-      }
-    }else{
-      generatedText =  "I dont understand :( I'm retarded :("
     }
-  
+  });
+
+  // handle thanks
+  if (nlpUtil.checkEntity(received_message.nlp, nlpEntites.THANKS, 0.8)) {
+    generatedRes.text = generatedRes.text + "No problems. ";
+  }
+
+  //handle bye
+  if (nlpUtil.checkEntity(received_message.nlp, nlpEntites.BYE, 0.8)) {
+    generatedRes.text = generatedRes.text + "See you soon. ";
   }
   
   
-  
-  
-  
-  // Sends the response message
-  if(generatedText){
-    await callSendAPI(sender_psid, {"text": generatedText, "quick_replies":quickReplies})
+  // When non of the above match the recieved message
+  if (!(generatedRes.text || generatedRes.attachment.length)) {
+    //check sentiment
+    if (nlpUtil.checkEntity(received_message.nlp, nlpEntites.SENTIMENT, 0.6)) {
+      let sentiment = nlpUtil.getFirstEntity(
+        received_message.nlp,
+        nlpEntites.SENTIMENT
+      );
+      let sentimentValues = nlpUtil.values.sentiment;
+      
+      
+      if (sentiment.value == sentimentValues.POSITIVE) {
+        generatedRes.text = generatedRes.text + "Hope to see you soon <3";
+      } else if (sentiment.value == sentimentValues.NEGATIVE) {
+        generatedRes.text =
+          generatedRes.text + "I'm sorry :( plz dont be mean :(";
+      } else if (sentiment.value == sentimentValues.NEUTRAL) {
+        generatedRes.text = generatedRes.text + "Alright";
+      } 
+    } else {
+      generatedRes.text = "I dont understand :( I'm retarded :(";
+    }
   }
-  if(generatedAttachment){
-    await callSendAPI(sender_psid, {"attachment": generatedAttachment, "quick_replies":quickReplies})
+  
+  // Sends the concated response message
+  if (generatedRes.text) {
+    await APIUtil.callSendAPI(sender_psid, {
+      text: generatedRes.text,
+      quick_replies: quickReplies
+    });
   }
   
-  
+  // Sends the response attachment
+  if (generatedRes.attachment) {
+    generatedRes.attachment.forEach( async attachment => {
+      await APIUtil.callSendAPI(sender_psid, {
+      attachment: attachment,
+      quick_replies: quickReplies
+    })
+      
+    })
     
-  
-  console.log(generatedAttachment)
+  }
 }
 
 // Handles messaging_postbacks events
 async function handlePostback(sender_psid, received_postback) {
   let response;
-  
+
   let payload = received_postback.payload;
-  
-  
-  if (payload === "START"){
-    takeThreadControl(sender_psid)
-    
-    console.log(response)
-    await callSendAPI( sender_psid, {"text": "Hey I'm Bot :) What can i help you?"})
-    await callSendAPI( sender_psid, {"text": "You can ask me questions or use the buttons below :)", 
-                                     "quick_replies": quickReplies})
+  let payloadValues = payloadHandler.payloads;
+
+  if (payload == payloadValues.START) {
+    payloadHandler.startHandler(sender_psid);
+    return;
   }
 }
-
-// Sends response messages via the Send API
-function callSendAPI(sender_psid, response) {
-  // Construct the message body
-  let request_body = {
-    "recipient": {
-      "id": sender_psid
-    },
-    "message": response,
-    
-  }
-  
-  return (axios({
-    url: "https://graph.facebook.com/v2.6/me/messages",
-    method: 'post',
-    params:{ access_token: PAGE_ACCESS_TOKEN },
-    data: request_body,
-    headers: {
-      "Content-Type": "application/json"
-    }
-    
-  }).catch((error) => {
-    if(!error){
-      console.log('message sent!')
-    } else{
-      console.error("Unable to send message:" + error)
-    }
-  }))
-  
-}
-const takeThreadControl = function(sender_psid){
-  axios(
-        {
-        url: "https://graph.facebook.com/v2.6/me/take_thread_control",
-        method: 'post',
-        params:{ access_token: PAGE_ACCESS_TOKEN },
-        data: {"recipient": {"id": sender_psid}},
-        headers: {
-          "Content-Type": "application/json"
-          }
-        })
-        .then((res)=>{console.log(res.data)})
-        .catch((err)=> {
-        console.log(err)
-        }
-      )
-}
-const passThreadControl= function(sender_psid, appId){
-  axios(
-        {
-        url: "https://graph.facebook.com/v2.6/me/pass_thread_control",
-        method: 'post',
-        params:{ access_token: PAGE_ACCESS_TOKEN },
-        data: {"recipient": {"id": sender_psid}, "target_app_id": appId},
-        headers: {
-          "Content-Type": "application/json"
-          }
-        })
-        .then((res)=>{console.log(res.data)})
-        .catch((err)=> {
-        console.log(err)
-        }
-      )
-}
-
-const getFirstEntity = function(nlp, name){
-  return nlp && nlp.entities && nlp.entities[name] && nlp.entities[name][0];
-}
-
